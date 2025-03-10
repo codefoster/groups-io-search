@@ -1,14 +1,85 @@
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
+const yargs = require('yargs/yargs');
+const { hideBin } = require('yargs/helpers');
+require('dotenv').config();
+
+// Helper function to sanitize text for filenames
+const sanitizeForFilename = (text) => {
+  return text.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+};
+
+// Parse command line arguments
+const argv = yargs(hideBin(process.argv))
+  .option('email', {
+    alias: 'e',
+    type: 'string',
+    description: 'Your groups.io email',
+    default: process.env.GROUPS_IO_EMAIL
+  })
+  .option('password', {
+    alias: 'p',
+    type: 'string',
+    description: 'Your groups.io password',
+    default: process.env.GROUPS_IO_PASSWORD
+  })
+  .option('query', {
+    alias: 'q',
+    type: 'string',
+    description: 'Search query'
+  })
+  .option('id', {
+    alias: 'i',
+    type: 'number',
+    description: 'Group ID to search',
+    default: process.env.GROUPS_IO_GROUP_ID ? parseInt(process.env.GROUPS_IO_GROUP_ID) : undefined
+  })
+  .option('group-name', {
+    alias: 'g',
+    type: 'string',
+    description: 'Group name to search',
+    default: process.env.GROUPS_IO_GROUP_NAME
+  })
+  .option('output', {
+    alias: 'o',
+    type: 'string',
+    description: 'Output file path (if not specified, results are shown on screen)',
+    default: null 
+  })
+  .option('format', {
+    alias: 'f',
+    type: 'string',
+    description: 'Output format: full, body-only, or summary',
+    choices: ['full', 'body-only', 'summary'],
+    default: 'body-only'
+  })
+  .demandOption(['query'], 'Please provide a search query')
+  .check((argv) => {
+    // Check if email and password are provided
+    if (!argv.email || !argv.password) {
+      throw new Error('Email and password are required. Provide them as arguments or in .env file');
+    }
+    
+    // Check if either group ID or group name is provided
+    if (!argv.id && !argv['group-name']) {
+      throw new Error('Either group ID or group name must be provided as argument or in .env file');
+    }
+    
+    return true;
+  })
+  .help()
+  .argv;
 
 // Configuration
 const config = {
-  email: process.env.GROUPS_IO_EMAIL || 'jeremy.foster@live.com',
-  password: process.env.GROUPS_IO_PASSWORD || '',
-  groupId: 36599,
-  searchQuery: 'westerbeke',
-  outputFile: path.join(__dirname, 'search-results.json')
+  email: argv.email,
+  password: argv.password,
+  groupId: argv.id,
+  groupName: argv['group-name'],
+  searchQuery: argv.query,
+  outputFile: argv.output ? path.resolve(argv.output) : null,
+  format: argv.format
 };
 
 // Create an axios instance
@@ -58,12 +129,21 @@ async function searchArchives(page = 1, allResults = []) {
   console.log(`Fetching page ${page}...`);
   
   try {
+    // Define search parameters based on whether group ID or group name was provided
+    const searchParams = {
+      q: config.searchQuery,
+      page
+    };
+    
+    // Use either group_id or group_name parameter
+    if (config.groupId) {
+      searchParams.group_id = config.groupId;
+    } else {
+      searchParams.group_name = config.groupName;
+    }
+    
     const response = await api.get('/searcharchives', {
-      params: {
-        group_id: config.groupId,
-        q: config.searchQuery,
-        page
-      }
+      params: searchParams
     });
     
     if (response.status === 200) {
@@ -99,6 +179,43 @@ async function searchArchives(page = 1, allResults = []) {
   }
 }
 
+function formatResults(results, format) {
+  switch (format) {
+    case 'full':
+      return results;
+    case 'body-only':
+      return results.map(result => result.body);
+    case 'summary':
+      return results.map(result => ({
+        subject: result.subject,
+        from: result.from,
+        date: result.date,
+        snippet: result.body ? result.body.substring(0, 150) + '...' : ''
+      }));
+    default:
+      return results.map(result => result.body);
+  }
+}
+
+function displayResults(results, format) {
+  const formattedResults = formatResults(results, format);
+  
+  if (format === 'summary') {
+    console.log('\n===== SEARCH RESULTS =====\n');
+    formattedResults.forEach((result, index) => {
+      console.log(`Result #${index + 1}`);
+      console.log(`Subject: ${result.subject}`);
+      console.log(`From: ${result.from}`);
+      console.log(`Date: ${result.date}`);
+      console.log(`Snippet: ${result.snippet}`);
+      console.log('-------------------');
+    });
+    console.log(`Total results: ${results.length}`);
+  } else {
+    console.log(JSON.stringify(formattedResults, null, 2));
+  }
+}
+
 async function main() {
   try {
     const loggedIn = await login();
@@ -108,16 +225,31 @@ async function main() {
       process.exit(1);
     }
     
-    console.log(`Searching for "${config.searchQuery}" in group ${config.groupId}...`);
+    const groupIdentifier = config.groupId ? `ID ${config.groupId}` : `name "${config.groupName}"`;
+    console.log(`Searching for "${config.searchQuery}" in group ${groupIdentifier}...`);
     const allResults = await searchArchives();
     
-    console.log(`Writing ${allResults.length} results to file...`);
-    fs.writeFileSync(
-      config.outputFile, 
-      JSON.stringify(allResults.map(all => all.body), null, 2)
-    );
+    if (allResults.length === 0) {
+      console.log('No results found for your search.');
+      return;
+    }
     
-    console.log(`Search complete! Results saved to ${config.outputFile}`);
+    // Format the results based on the specified format
+    const formattedResults = formatResults(allResults, config.format);
+    
+    // If output file is specified, save results to file
+    if (config.outputFile) {
+      console.log(`Writing ${allResults.length} results to ${config.outputFile}...`);
+      fs.writeFileSync(
+        config.outputFile, 
+        JSON.stringify(formattedResults, null, 2)
+      );
+      console.log(`Search complete! Results saved to ${config.outputFile}`);
+    } else {
+      // Display results to console
+      console.log(`Found ${allResults.length} results:`);
+      displayResults(allResults, config.format);
+    }
   } catch (error) {
     console.error('An unexpected error occurred:', error);
   }
