@@ -5,7 +5,7 @@ const path = require('path');
 // Configuration
 const config = {
   email: process.env.GROUPS_IO_EMAIL || 'jeremy.foster@live.com',
-  password: process.env.GROUPS_IO_PASSWORD || 'N6z=v#m2XLy*fJMs',
+  password: process.env.GROUPS_IO_PASSWORD || '',
   groupId: 36599,
   searchQuery: 'westerbeke',
   outputFile: path.join(__dirname, 'search-results.json')
